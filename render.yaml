@@ -8,4 +8,8 @@ services:
       - key: NODE_ENV
         value: production
       - key: PORT
-        value: 10000 
+        value: 10000
+      - key: MQTT_PORT
+        value: 1883
+      - key: WS_PORT
+        value: 8888 

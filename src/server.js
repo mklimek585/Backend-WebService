@@ -1,5 +1,8 @@
 const express = require('express');
 const cors = require('cors');
+const aedes = require('aedes')();
+const { createServer } = require('ws');
+const { createServer: createHttpServer } = require('http');
 require('dotenv').config();
 
 const app = express();
@@ -95,9 +98,53 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok' });
 });
 
-// Start server
+// Konfiguracja MQTT
+const MQTT_PORT = process.env.MQTT_PORT || 1883;
+const WS_PORT = process.env.WS_PORT || 8888;
+
+// Obsługa wiadomości MQTT
+aedes.on('publish', (packet, client) => {
+    if (client) {
+        console.log('MQTT message received from client:', client.id);
+        console.log('Topic:', packet.topic);
+        console.log('Payload:', packet.payload.toString());
+
+        try {
+            const payload = JSON.parse(packet.payload.toString());
+            const newMeasurement = {
+                id: measurements.length + 1,
+                ...payload,
+                timestamp: Date.now(),
+                protocol: 'MQTT',
+                is_synced: 0,
+                sync_timestamp: null
+            };
+            
+            measurements.push(newMeasurement);
+            console.log(`Added new MQTT measurement. Total measurements: ${measurements.length}`);
+        } catch (error) {
+            console.error('Error processing MQTT message:', error);
+        }
+    }
+});
+
+// Obsługa połączeń MQTT
+aedes.on('client', (client) => {
+    console.log('MQTT client connected:', client.id);
+});
+
+aedes.on('clientDisconnect', (client) => {
+    console.log('MQTT client disconnected:', client.id);
+});
+
+// Utworzenie serwerów MQTT
+const httpServer = createHttpServer(app);
+const wsServer = createServer({ server: httpServer }, aedes.handle);
+
+// Start serwerów
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+httpServer.listen(PORT, () => {
+    console.log(`HTTP server running on port ${PORT}`);
+    console.log(`MQTT WebSocket server running on port ${WS_PORT}`);
     console.log('Server initialization complete');
 }); 
