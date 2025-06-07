@@ -78,6 +78,10 @@ function insertBatch({island_id, timestamp, measurements, protocol, latency}) {
         latency || null,
         Date.now()
     );
+    // Logujemy po każdym zapisie
+    console.log(`[DB] Zapisano paczkę: {island_id: ${island_id}, timestamp: ${timestamp}, protocol: ${protocol}, measurements: ${measurements.length}}`);
+    const count = getBatchCount();
+    console.log(`[DB] Liczba paczek w bazie po zapisie: ${count}`);
 }
 
 function getBatchCount() {
@@ -142,11 +146,13 @@ app.post('/api/measurements', apiKeyAuth, (req, res) => {
         const { island_id, measurements, latency } = entry;
         const timestamp = entry.timestamp || Date.now();
         if (!island_id || !measurements || !Array.isArray(measurements)) {
+            console.log(`[HTTP] Odrzucono paczkę: brak wymaganych pól (island_id, measurements)`);
             return res.status(400).json({
                 error: 'Invalid data format',
                 message: 'Each entry must contain island_id and measurements array'
             });
         }
+        console.log(`[HTTP] Otrzymano paczkę: {island_id: ${island_id}, timestamp: ${timestamp}, measurements: ${measurements.length}}`);
         insertBatch({island_id, timestamp, measurements, protocol: 'HTTP', latency});
         allNewMeasurements.push({island_id, timestamp, measurements, protocol: 'HTTP', latency});
     }
@@ -174,9 +180,10 @@ aedes.on('publish', (packet, client) => {
                 const { island_id, measurements, latency } = entry;
                 const timestamp = entry.timestamp || Date.now();
                 if (!island_id || !measurements || !Array.isArray(measurements)) {
-                    console.error('Invalid MQTT message format');
+                    console.log(`[MQTT] Odrzucono paczkę: brak wymaganych pól (island_id, measurements)`);
                     continue;
                 }
+                console.log(`[MQTT] Otrzymano paczkę: {island_id: ${island_id}, timestamp: ${timestamp}, measurements: ${measurements.length}}`);
                 insertBatch({island_id, timestamp, measurements, protocol: 'MQTT', latency});
             }
             autoClearIfLimit();
