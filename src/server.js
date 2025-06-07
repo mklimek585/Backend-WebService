@@ -182,7 +182,6 @@ app.get('/health', (req, res) => {
 
 // Konfiguracja MQTT
 const MQTT_PORT = process.env.MQTT_PORT || 1883;
-const WS_PORT = process.env.WS_PORT || 8888;
 
 // Obsługa wiadomości MQTT
 aedes.on('publish', (packet, client) => {
@@ -216,18 +215,29 @@ aedes.on('clientDisconnect', (client) => {
     console.log('MQTT client disconnected:', client.id);
 });
 
-// Utworzenie serwerów MQTT
+// Utworzenie serwerów HTTP i MQTT WebSocket
 const httpServer = createServer(app);
-const wsServer = new WebSocket.Server({ server: httpServer });
-wsServer.on('connection', (ws) => {
-  const stream = WebSocket.createWebSocketStream(ws);
-  aedes.handle(stream);
+
+// Konfiguracja WebSocket dla MQTT na ścieżce /mqtt
+const wsServer = new WebSocket.Server({ 
+    server: httpServer,
+    path: '/mqtt'
 });
 
-// Start serwerów
+wsServer.on('connection', (ws, req) => {
+    console.log('MQTT WebSocket connection established from:', req.connection.remoteAddress);
+    const stream = WebSocket.createWebSocketStream(ws);
+    aedes.handle(stream);
+});
+
+wsServer.on('error', (error) => {
+    console.error('WebSocket server error:', error);
+});
+
+// Start serwera
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
     console.log(`HTTP server running on port ${PORT}`);
-    console.log(`MQTT WebSocket server running on port ${WS_PORT}`);
+    console.log(`MQTT WebSocket server running on port ${PORT} at path /mqtt`);
     console.log('Server initialization complete');
 }); 
