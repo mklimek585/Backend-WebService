@@ -96,6 +96,35 @@ function getAllBatches() {
     return db.prepare('SELECT * FROM measurement_batches').all();
 }
 
+function getLatestMeasurements() {
+    // Pobierz najnowsze paczki dla każdej wyspy
+    const latestBatches = db.prepare(`
+        SELECT mb.* FROM measurement_batches mb
+        INNER JOIN (
+            SELECT island_id, MAX(timestamp) as max_timestamp
+            FROM measurement_batches
+            GROUP BY island_id
+        ) latest ON mb.island_id = latest.island_id AND mb.timestamp = latest.max_timestamp
+    `).all();
+    
+    // Rozpakuj measurements z najnowszych paczek
+    const latestMeasurements = [];
+    for (const batch of latestBatches) {
+        const measurements = JSON.parse(batch.measurements_json);
+        for (const m of measurements) {
+            latestMeasurements.push({
+                island_id: batch.island_id,
+                sensor_id: m.sensor_id,
+                value: m.value,
+                timestamp: batch.timestamp,
+                protocol: batch.protocol,
+                latency: batch.latency,
+            });
+        }
+    }
+    return latestMeasurements;
+}
+
 function autoClearIfLimit() {
     if (getBatchCount() >= LOCAL_DB_LIMIT) {
         console.log(`[SQLite] Limit ${LOCAL_DB_LIMIT} paczek osiągnięty, czyszczę bazę...`);
@@ -122,8 +151,20 @@ app.options('/api/measurements', cors(corsOptions));
 
 // Endpoint do pobierania wszystkich pomiarów - chroniony API key
 app.get('/api/measurements', apiKeyAuth, (req, res) => {
+    // Zwróć tylko najnowsze pomiary dla każdej wyspy
+    const latestMeasurements = getLatestMeasurements();
+    console.log(`[API] Zwracam ${latestMeasurements.length} najnowszych pomiarów`);
+    res.json(latestMeasurements);
+});
+
+// Endpoint do pobierania wszystkich paczek z lokalnej bazy (dla debugowania)
+app.get('/api/localdb', apiKeyAuth, (req, res) => {
+    res.json(getAllBatches());
+});
+
+// Endpoint do pobierania wszystkich pomiarów (dla debugowania) 
+app.get('/api/measurements/all', apiKeyAuth, (req, res) => {
     const batches = getAllBatches();
-    // Rozpakuj measurements z każdej paczki do płaskiej listy
     const allMeasurements = [];
     for (const batch of batches) {
         const measurements = JSON.parse(batch.measurements_json);
@@ -138,12 +179,8 @@ app.get('/api/measurements', apiKeyAuth, (req, res) => {
             });
         }
     }
+    console.log(`[API] Zwracam ${allMeasurements.length} wszystkich pomiarów (historia)`);
     res.json(allMeasurements);
-});
-
-// Endpoint do pobierania wszystkich paczek z lokalnej bazy
-app.get('/api/localdb', apiKeyAuth, (req, res) => {
-    res.json(getAllBatches());
 });
 
 // Endpoint do czyszczenia lokalnej bazy
