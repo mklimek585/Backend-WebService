@@ -122,9 +122,23 @@ app.options('/api/measurements', cors(corsOptions));
 
 // Endpoint do pobierania wszystkich pomiarów - chroniony API key
 app.get('/api/measurements', apiKeyAuth, (req, res) => {
-    console.log('Received request for measurements');
-    console.log(`Sending ${measurements.length} measurements`);
-    res.json(measurements);
+    const batches = getAllBatches();
+    // Rozpakuj measurements z każdej paczki do płaskiej listy
+    const allMeasurements = [];
+    for (const batch of batches) {
+        const measurements = JSON.parse(batch.measurements_json);
+        for (const m of measurements) {
+            allMeasurements.push({
+                island_id: batch.island_id,
+                sensor_id: m.sensor_id,
+                value: m.value,
+                timestamp: batch.timestamp,
+                protocol: batch.protocol,
+                latency: batch.latency,
+            });
+        }
+    }
+    res.json(allMeasurements);
 });
 
 // Endpoint do pobierania wszystkich paczek z lokalnej bazy
