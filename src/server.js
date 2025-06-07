@@ -4,6 +4,8 @@ const aedes = require('aedes')();
 const { createServer } = require('ws');
 const { createServer: createHttpServer } = require('http');
 require('dotenv').config();
+const Database = require('better-sqlite3');
+const path = require('path');
 
 const app = express();
 
@@ -50,6 +52,53 @@ app.use(express.json());
 
 console.log('Middleware configured');
 
+// Inicjalizacja bazy SQLite w katalogu projektu
+const db = new Database(path.join(__dirname, '../local_measurements.db'));
+
+db.exec(`CREATE TABLE IF NOT EXISTS measurement_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    island_id TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    measurements_json TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    latency INTEGER,
+    received_at INTEGER NOT NULL
+)`);
+
+const LOCAL_DB_LIMIT = 1000;
+
+function insertBatch({island_id, timestamp, measurements, protocol, latency}) {
+    const stmt = db.prepare(`INSERT INTO measurement_batches (island_id, timestamp, measurements_json, protocol, latency, received_at)
+        VALUES (?, ?, ?, ?, ?, ?)`);
+    stmt.run(
+        island_id,
+        timestamp,
+        JSON.stringify(measurements),
+        protocol,
+        latency || null,
+        Date.now()
+    );
+}
+
+function getBatchCount() {
+    return db.prepare('SELECT COUNT(*) as count FROM measurement_batches').get().count;
+}
+
+function clearBatches() {
+    db.prepare('DELETE FROM measurement_batches').run();
+}
+
+function getAllBatches() {
+    return db.prepare('SELECT * FROM measurement_batches').all();
+}
+
+function autoClearIfLimit() {
+    if (getBatchCount() >= LOCAL_DB_LIMIT) {
+        console.log(`[SQLite] Limit ${LOCAL_DB_LIMIT} paczek osiągnięty, czyszczę bazę...`);
+        clearBatches();
+    }
+}
+
 // Przechowywanie danych w pamięci
 const measurements = [
     {id: 1, island_id: 'island1', sensor_id: 'spare1', value: 25.5, timestamp: Date.now() - 1000, protocol: 'HTTP', latency: 150, is_synced: 0, sync_timestamp: null},
@@ -74,22 +123,35 @@ app.get('/api/measurements', apiKeyAuth, (req, res) => {
     res.json(measurements);
 });
 
+// Endpoint do pobierania wszystkich paczek z lokalnej bazy
+app.get('/api/localdb', apiKeyAuth, (req, res) => {
+    res.json(getAllBatches());
+});
+
+// Endpoint do czyszczenia lokalnej bazy
+app.delete('/api/localdb', apiKeyAuth, (req, res) => {
+    clearBatches();
+    res.json({ status: 'cleared' });
+});
+
 // Endpoint do dodawania nowych pomiarów - chroniony API key
 app.post('/api/measurements', apiKeyAuth, (req, res) => {
-    console.log('Received new measurement:', req.body);
-    
-    const newMeasurement = {
-        id: measurements.length + 1,
-        ...req.body,
-        timestamp: req.body.timestamp || Date.now(),
-        is_synced: 0,
-        sync_timestamp: null
-    };
-    
-    measurements.push(newMeasurement);
-    console.log(`Added new measurement. Total measurements: ${measurements.length}`);
-    
-    res.status(201).json(newMeasurement);
+    const data = Array.isArray(req.body) ? req.body : [req.body];
+    let allNewMeasurements = [];
+    for (const entry of data) {
+        const { island_id, measurements, latency } = entry;
+        const timestamp = entry.timestamp || Date.now();
+        if (!island_id || !measurements || !Array.isArray(measurements)) {
+            return res.status(400).json({
+                error: 'Invalid data format',
+                message: 'Each entry must contain island_id and measurements array'
+            });
+        }
+        insertBatch({island_id, timestamp, measurements, protocol: 'HTTP', latency});
+        allNewMeasurements.push({island_id, timestamp, measurements, protocol: 'HTTP', latency});
+    }
+    autoClearIfLimit();
+    res.status(201).json(allNewMeasurements);
 });
 
 // Endpoint do sprawdzenia statusu serwera - bez API key
@@ -105,23 +167,19 @@ const WS_PORT = process.env.WS_PORT || 8888;
 // Obsługa wiadomości MQTT
 aedes.on('publish', (packet, client) => {
     if (client) {
-        console.log('MQTT message received from client:', client.id);
-        console.log('Topic:', packet.topic);
-        console.log('Payload:', packet.payload.toString());
-
         try {
             const payload = JSON.parse(packet.payload.toString());
-            const newMeasurement = {
-                id: measurements.length + 1,
-                ...payload,
-                timestamp: Date.now(),
-                protocol: 'MQTT',
-                is_synced: 0,
-                sync_timestamp: null
-            };
-            
-            measurements.push(newMeasurement);
-            console.log(`Added new MQTT measurement. Total measurements: ${measurements.length}`);
+            const data = Array.isArray(payload) ? payload : [payload];
+            for (const entry of data) {
+                const { island_id, measurements, latency } = entry;
+                const timestamp = entry.timestamp || Date.now();
+                if (!island_id || !measurements || !Array.isArray(measurements)) {
+                    console.error('Invalid MQTT message format');
+                    continue;
+                }
+                insertBatch({island_id, timestamp, measurements, protocol: 'MQTT', latency});
+            }
+            autoClearIfLimit();
         } catch (error) {
             console.error('Error processing MQTT message:', error);
         }
