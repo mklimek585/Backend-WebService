@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const aedes = require('aedes')();
-const { createServer } = require('ws');
-const { createServer: createHttpServer } = require('http');
+const { createServer } = require('http');
+const WebSocket = require('ws');
 require('dotenv').config();
 const Database = require('better-sqlite3');
 const path = require('path');
@@ -203,8 +203,12 @@ aedes.on('clientDisconnect', (client) => {
 });
 
 // Utworzenie serwerów MQTT
-const httpServer = createHttpServer(app);
-const wsServer = createServer({ server: httpServer }, aedes.handle);
+const httpServer = createServer(app);
+const wsServer = new WebSocket.Server({ server: httpServer });
+wsServer.on('connection', (ws) => {
+  const stream = WebSocket.createWebSocketStream(ws);
+  aedes.handle(stream);
+});
 
 // Start serwerów
 const PORT = process.env.PORT || 3000;
