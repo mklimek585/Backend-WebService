@@ -189,6 +189,61 @@ app.delete('/api/localdb', apiKeyAuth, (req, res) => {
     res.json({ status: 'cleared' });
 });
 
+// Endpoint do debugowania - ładny widok całej bazy
+app.get('/api/debug', apiKeyAuth, (req, res) => {
+    const batches = getAllBatches();
+    const stats = {
+        total_batches: batches.length,
+        database_size_kb: Math.round(batches.length * 0.5), // szacunkowy rozmiar
+        oldest_timestamp: batches.length > 0 ? Math.min(...batches.map(b => b.timestamp)) : null,
+        newest_timestamp: batches.length > 0 ? Math.max(...batches.map(b => b.timestamp)) : null,
+        protocols: {}
+    };
+    
+    // Statystyki protokołów
+    batches.forEach(batch => {
+        stats.protocols[batch.protocol] = (stats.protocols[batch.protocol] || 0) + 1;
+    });
+    
+    // Konwersja timestampów na czytelne daty
+    const formatTimestamp = (ts) => {
+        if (!ts) return null;
+        if (ts > 1000000000000) { // milliseconds
+            return new Date(ts).toISOString();
+        } else { // seconds
+            return new Date(ts * 1000).toISOString();
+        }
+    };
+    
+    stats.oldest_date = formatTimestamp(stats.oldest_timestamp);
+    stats.newest_date = formatTimestamp(stats.newest_timestamp);
+    
+    // Ostatnie 5 paczek z formatowaniem
+    const recentBatches = batches.slice(-5).map(batch => ({
+        id: batch.id,
+        island_id: batch.island_id,
+        timestamp: batch.timestamp,
+        date: formatTimestamp(batch.timestamp),
+        protocol: batch.protocol,
+        latency: batch.latency,
+        measurements_count: JSON.parse(batch.measurements_json).length,
+        measurements: JSON.parse(batch.measurements_json)
+    }));
+    
+    // Najnowsze pomiary (dla sprawdzenia logiki)
+    const latestMeasurements = getLatestMeasurements();
+    
+    res.json({
+        status: 'ok',
+        server_time: new Date().toISOString(),
+        database_stats: stats,
+        recent_batches: recentBatches,
+        latest_measurements_count: latestMeasurements.length,
+        latest_measurements: latestMeasurements,
+        note: "Ten endpoint pokazuje kompletny stan bazy danych SQLite"
+    });
+});
+
 // Endpoint do dodawania nowych pomiarów - chroniony API key
 app.post('/api/measurements', apiKeyAuth, (req, res) => {
     const data = Array.isArray(req.body) ? req.body : [req.body];
