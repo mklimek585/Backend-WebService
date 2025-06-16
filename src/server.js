@@ -97,7 +97,7 @@ function getAllBatches() {
 }
 
 function getLatestMeasurements() {
-    // Pobierz najnowsze paczki dla każdej wyspy
+    // Pobierz najnowsze paczki dla każdej wyspy (bez ograniczeń czasowych)
     const latestBatches = db.prepare(`
         SELECT mb.* FROM measurement_batches mb
         INNER JOIN (
@@ -105,9 +105,27 @@ function getLatestMeasurements() {
             FROM measurement_batches
             GROUP BY island_id
         ) latest ON mb.island_id = latest.island_id AND mb.timestamp = latest.max_timestamp
+        ORDER BY mb.timestamp DESC
     `).all();
     
-    // Rozpakuj measurements z najnowszych paczek
+    // Jeśli nie ma najnowszych paczek, weź po prostu ostatnie dostępne
+    if (latestBatches.length === 0) {
+        const fallbackBatches = db.prepare(`
+            SELECT * FROM measurement_batches 
+            ORDER BY timestamp DESC 
+            LIMIT 10
+        `).all();
+        
+        if (fallbackBatches.length === 0) {
+            console.log('[API] Brak danych w bazie - zwracam pustą tablicę');
+            return [];
+        }
+        
+        console.log(`[API] Używam fallback - ostatnie ${fallbackBatches.length} paczek`);
+        latestBatches.push(...fallbackBatches);
+    }
+    
+    // Rozpakuj measurements z paczek
     const latestMeasurements = [];
     for (const batch of latestBatches) {
         const measurements = JSON.parse(batch.measurements_json);
@@ -122,6 +140,8 @@ function getLatestMeasurements() {
             });
         }
     }
+    
+    console.log(`[API] Zwracam ${latestMeasurements.length} pomiarów z ${latestBatches.length} paczek`);
     return latestMeasurements;
 }
 
