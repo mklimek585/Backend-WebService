@@ -270,7 +270,17 @@ app.post('/api/measurements', apiKeyAuth, (req, res) => {
     let allNewMeasurements = [];
     for (const entry of data) {
         const { island_id, measurements, latency } = entry;
-        const timestamp = entry.timestamp || Date.now();
+        
+        let timestamp = entry.timestamp;
+        if (timestamp) {
+            // Jeśli timestamp jest w sekundach (liczba mniejsza niż 10^12), konwertuj na milisekundy
+            if (timestamp < 1000000000000) {
+                timestamp *= 1000;
+            }
+        } else {
+            timestamp = Date.now();
+        }
+
         if (!island_id || !measurements || !Array.isArray(measurements)) {
             console.log(`[HTTP] Odrzucono paczkę: brak wymaganych pól (island_id, measurements)`);
             return res.status(400).json({
@@ -303,7 +313,17 @@ aedes.on('publish', (packet, client) => {
             const data = Array.isArray(payload) ? payload : [payload];
             for (const entry of data) {
                 const { island_id, measurements, latency } = entry;
-                const timestamp = entry.timestamp || Date.now();
+
+                let timestamp = entry.timestamp;
+                if (timestamp) {
+                    // Jeśli timestamp jest w sekundach (liczba mniejsza niż 10^12), konwertuj na milisekundy
+                    if (timestamp < 1000000000000) {
+                        timestamp *= 1000;
+                    }
+                } else {
+                    timestamp = Date.now();
+                }
+                
                 if (!island_id || !measurements || !Array.isArray(measurements)) {
                     console.log(`[MQTT] Odrzucono paczkę: brak wymaganych pól (island_id, measurements)`);
                     continue;
