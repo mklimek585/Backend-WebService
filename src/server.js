@@ -61,21 +61,19 @@ db.exec(`CREATE TABLE IF NOT EXISTS measurement_batches (
     timestamp INTEGER NOT NULL,
     measurements_json TEXT NOT NULL,
     protocol TEXT NOT NULL,
-    latency INTEGER,
     received_at INTEGER NOT NULL
 )`);
 
 const LOCAL_DB_LIMIT = 1000;
 
-function insertBatch({island_id, timestamp, measurements, protocol, latency}) {
-    const stmt = db.prepare(`INSERT INTO measurement_batches (island_id, timestamp, measurements_json, protocol, latency, received_at)
-        VALUES (?, ?, ?, ?, ?, ?)`);
+function insertBatch({island_id, timestamp, measurements, protocol}) {
+    const stmt = db.prepare(`INSERT INTO measurement_batches (island_id, timestamp, measurements_json, protocol, received_at)
+        VALUES (?, ?, ?, ?, ?)`);
     stmt.run(
         island_id,
         timestamp,
         JSON.stringify(measurements),
         protocol,
-        latency || null,
         Date.now()
     );
     // Logujemy po każdym zapisie
@@ -136,7 +134,6 @@ function getLatestMeasurements() {
                 value: m.value,
                 timestamp: batch.timestamp,
                 protocol: batch.protocol,
-                latency: batch.latency,
             });
         }
     }
@@ -154,16 +151,16 @@ function autoClearIfLimit() {
 
 // Przechowywanie danych w pamięci
 const measurements = [
-    {id: 1, island_id: 'island1', sensor_id: 'spare1', value: 25.5, timestamp: Date.now() - 1000, protocol: 'HTTP', latency: 150, is_synced: 0, sync_timestamp: null},
-    {id: 2, island_id: 'island1', sensor_id: 'spare2', value: 30.2, timestamp: Date.now() - 2000, protocol: 'HTTP', latency: 180, is_synced: 0, sync_timestamp: null},
-    {id: 3, island_id: 'island2', sensor_id: 'spare1', value: 28.7, timestamp: Date.now() - 3000, protocol: 'MQTT', latency: 120, is_synced: 0, sync_timestamp: null},
-    {id: 4, island_id: 'island2', sensor_id: 'spare2', value: 26.8, timestamp: Date.now() - 4000, protocol: 'MQTT', latency: 130, is_synced: 0, sync_timestamp: null},
-    {id: 5, island_id: 'island1', sensor_id: 'spare1', value: 24.9, timestamp: Date.now() - 5000, protocol: 'MQTT', latency: 140, is_synced: 0, sync_timestamp: null},
-    {id: 6, island_id: 'island2', sensor_id: 'spare1', value: 27.6, timestamp: Date.now() - 6000, protocol: 'MQTT', latency: 125, is_synced: 0, sync_timestamp: null},
-    {id: 7, island_id: 'island1', sensor_id: 'spare2', value: 31.0, timestamp: Date.now() - 7000, protocol: 'HTTP', latency: 165, is_synced: 0, sync_timestamp: null},
-    {id: 8, island_id: 'island2', sensor_id: 'spare2', value: 29.3, timestamp: Date.now() - 8000, protocol: 'HTTP', latency: 155, is_synced: 0, sync_timestamp: null},
-    {id: 9, island_id: 'island1', sensor_id: 'spare1', value: 26.7, timestamp: Date.now() - 9000, protocol: 'MQTT', latency: 135, is_synced: 0, sync_timestamp: null},
-    {id: 10, island_id: 'island2', sensor_id: 'spare1', value: 28.4, timestamp: Date.now() - 10000, protocol: 'HTTP', latency: 145, is_synced: 0, sync_timestamp: null}
+    {id: 1, island_id: 'island1', sensor_id: 'spare1', value: 25.5, timestamp: Date.now() - 1000, protocol: 'HTTP', is_synced: 0, sync_timestamp: null},
+    {id: 2, island_id: 'island1', sensor_id: 'spare2', value: 30.2, timestamp: Date.now() - 2000, protocol: 'HTTP', is_synced: 0, sync_timestamp: null},
+    {id: 3, island_id: 'island2', sensor_id: 'spare1', value: 28.7, timestamp: Date.now() - 3000, protocol: 'MQTT', is_synced: 0, sync_timestamp: null},
+    {id: 4, island_id: 'island2', sensor_id: 'spare2', value: 26.8, timestamp: Date.now() - 4000, protocol: 'MQTT', is_synced: 0, sync_timestamp: null},
+    {id: 5, island_id: 'island1', sensor_id: 'spare1', value: 24.9, timestamp: Date.now() - 5000, protocol: 'MQTT', is_synced: 0, sync_timestamp: null},
+    {id: 6, island_id: 'island2', sensor_id: 'spare1', value: 27.6, timestamp: Date.now() - 6000, protocol: 'MQTT', is_synced: 0, sync_timestamp: null},
+    {id: 7, island_id: 'island1', sensor_id: 'spare2', value: 31.0, timestamp: Date.now() - 7000, protocol: 'HTTP', is_synced: 0, sync_timestamp: null},
+    {id: 8, island_id: 'island2', sensor_id: 'spare2', value: 29.3, timestamp: Date.now() - 8000, protocol: 'HTTP', is_synced: 0, sync_timestamp: null},
+    {id: 9, island_id: 'island1', sensor_id: 'spare1', value: 26.7, timestamp: Date.now() - 9000, protocol: 'MQTT', is_synced: 0, sync_timestamp: null},
+    {id: 10, island_id: 'island2', sensor_id: 'spare1', value: 28.4, timestamp: Date.now() - 10000, protocol: 'HTTP', is_synced: 0, sync_timestamp: null}
 ];
 
 // Obsługa preflight request dla /api/measurements
@@ -195,7 +192,6 @@ app.get('/api/measurements/all', apiKeyAuth, (req, res) => {
                 value: m.value,
                 timestamp: batch.timestamp,
                 protocol: batch.protocol,
-                latency: batch.latency,
             });
         }
     }
@@ -245,7 +241,6 @@ app.get('/api/debug', apiKeyAuth, (req, res) => {
         timestamp: batch.timestamp,
         date: formatTimestamp(batch.timestamp),
         protocol: batch.protocol,
-        latency: batch.latency,
         measurements_count: JSON.parse(batch.measurements_json).length,
         measurements: JSON.parse(batch.measurements_json)
     }));
@@ -269,7 +264,7 @@ app.post('/api/measurements', apiKeyAuth, (req, res) => {
     const data = Array.isArray(req.body) ? req.body : [req.body];
     let allNewMeasurements = [];
     for (const entry of data) {
-        const { island_id, measurements, latency } = entry;
+        const { island_id, measurements } = entry;
         
         let timestamp = entry.timestamp;
         if (timestamp) {
@@ -281,18 +276,16 @@ app.post('/api/measurements', apiKeyAuth, (req, res) => {
             timestamp = Date.now();
         }
 
-        if (!island_id || !measurements || !Array.isArray(measurements)) {
-            console.log(`[HTTP] Odrzucono paczkę: brak wymaganych pól (island_id, measurements)`);
-            return res.status(400).json({
-                error: 'Invalid data format',
-                message: 'Each entry must contain island_id and measurements array'
-            });
+        if (!island_id || !timestamp || !measurements) {
+            return res.status(400).json({ error: 'Missing required fields' });
         }
-        console.log(`[HTTP] Otrzymano paczkę: {island_id: ${island_id}, timestamp: ${timestamp}, measurements: ${measurements.length}}`);
-        insertBatch({island_id, timestamp, measurements, protocol: 'HTTP', latency});
-        allNewMeasurements.push({island_id, timestamp, measurements, protocol: 'HTTP', latency});
+
+        insertBatch({ island_id, timestamp, measurements, protocol: 'HTTP' });
+
+        console.log(`[HTTP] Odebrano paczkę z ${island_id}`);
+        broadcastMeasurements();
+        autoClearIfLimit();
     }
-    autoClearIfLimit();
     res.status(201).json(allNewMeasurements);
 });
 
@@ -312,7 +305,7 @@ aedes.on('publish', (packet, client) => {
             const payload = JSON.parse(packet.payload.toString());
             const data = Array.isArray(payload) ? payload : [payload];
             for (const entry of data) {
-                const { island_id, measurements, latency } = entry;
+                const { island_id, measurements } = entry;
 
                 let timestamp = entry.timestamp;
                 if (timestamp) {
@@ -324,16 +317,18 @@ aedes.on('publish', (packet, client) => {
                     timestamp = Date.now();
                 }
                 
-                if (!island_id || !measurements || !Array.isArray(measurements)) {
-                    console.log(`[MQTT] Odrzucono paczkę: brak wymaganych pól (island_id, measurements)`);
-                    continue;
+                if (!island_id || !timestamp || !measurements) {
+                    return res.status(400).json({ error: 'Missing required fields' });
                 }
-                console.log(`[MQTT] Otrzymano paczkę: {island_id: ${island_id}, timestamp: ${timestamp}, measurements: ${measurements.length}}`);
-                insertBatch({island_id, timestamp, measurements, protocol: 'MQTT', latency});
+
+                insertBatch({ island_id, timestamp, measurements, protocol: 'MQTT' });
+
+                console.log(`[MQTT] Odebrano paczkę z ${client.id} (${island_id})`);
+                broadcastMeasurements();
+                autoClearIfLimit();
             }
-            autoClearIfLimit();
-        } catch (error) {
-            console.error('Error processing MQTT message:', error);
+        } catch (e) {
+            console.error('Error processing MQTT message:', e);
         }
     }
 });
