@@ -185,12 +185,15 @@ function getAllBatches() {
 }
 
 function getLatestMeasurements() {
-    // Pobierz najnowsze paczki dla każdej wyspy (bez ograniczeń czasowych)
+    // Pobierz najnowsze paczki dla każdej wyspy, ignorując te z nieprawidłowym timestampem
     const latestBatches = db.prepare(`
         SELECT mb.* FROM measurement_batches mb
         INNER JOIN (
-            SELECT island_id, MAX(packet_timestamp) as max_timestamp
+            SELECT 
+                island_id, 
+                MAX(packet_timestamp) as max_timestamp
             FROM measurement_batches
+            WHERE packet_timestamp > 0  -- KLUCZOWA POPRAWKA: Ignoruj błędne wpisy
             GROUP BY island_id
         ) latest ON mb.island_id = latest.island_id AND mb.packet_timestamp = latest.max_timestamp
         ORDER BY mb.packet_timestamp DESC
