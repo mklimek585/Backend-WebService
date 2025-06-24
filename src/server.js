@@ -6,6 +6,7 @@ const WebSocket = require('ws');
 require('dotenv').config();
 const Database = require('better-sqlite3');
 const path = require('path');
+const { randomUUID } = require('crypto');
 
 const app = express();
 
@@ -82,9 +83,10 @@ try {
 const LOCAL_DB_LIMIT = 1000;
 
 function insertBatch({island_id, timestamp, measurements, protocol}) {
-    const stmt = db.prepare(`INSERT INTO measurement_batches (island_id, timestamp, measurements_json, protocol, received_at)
-        VALUES (?, ?, ?, ?, ?)`);
+    const stmt = db.prepare(`INSERT INTO measurement_batches (packet_uuid, island_id, timestamp, measurements_json, protocol, received_at)
+        VALUES (?, ?, ?, ?, ?, ?)`);
     stmt.run(
+        randomUUID(),
         island_id,
         timestamp,
         JSON.stringify(measurements),
