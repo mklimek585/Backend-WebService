@@ -55,6 +55,9 @@ console.log('Middleware configured');
 // Inicjalizacja bazy SQLite w katalogu projektu
 const db = new Database(path.join(__dirname, '../local_measurements.db'));
 
+// 3. Zweryfikuj Schemat Bazy Danych na Serwerze
+console.log('Aktualny schemat tabeli measurement_batches:', db.pragma('table_info(measurement_batches)'));
+
 db.exec(`CREATE TABLE IF NOT EXISTS measurement_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     island_id TEXT NOT NULL,
@@ -219,6 +222,9 @@ app.delete('/api/localdb', apiKeyAuth, (req, res) => {
 
 // Nowy endpoint do masowego zapisu pomiarów
 app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
+    // 1. Wyświetl Dokładną Treść Otrzymywanych Danych
+    console.log("Otrzymano żądanie /bulk:", JSON.stringify(req.body, null, 2));
+
     const packets = req.body;
 
     if (!Array.isArray(packets)) {
@@ -248,8 +254,8 @@ app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
                     // Ignorujemy błąd duplikatu - to oczekiwane zachowanie
                     console.log(`[DB] Zignorowano zduplikowany pakiet: ${packet.packet_uuid}`);
                 } else {
-                    // Jeśli to inny błąd, przerywamy transakcję
-                    console.error('[DB] Błąd transakcji, wykonuję rollback:', err);
+                    // 2. Wyświetl Dokładny Błąd z Bazy Danych
+                    console.error('[DB] KRYTYCZNY BŁĄD TRANSAKCJI, wykonuję rollback:', err);
                     throw err; 
                 }
             }
