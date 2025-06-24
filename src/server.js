@@ -56,27 +56,33 @@ console.log('Middleware configured');
 // Inicjalizacja bazy SQLite w katalogu projektu
 const db = new Database(path.join(__dirname, '../local_measurements.db'));
 
-// --- Ulepszona Migracja Bazy Danych ---
+// --- Ulepszona Migracja Bazy Danych z opcją czyszczenia danych ---
 const dbMigration = () => {
     console.log('[DB] Rozpoczynam weryfikację i migrację schematu bazy danych...');
     try {
         const tableInfo = db.pragma('table_info(measurement_batches)');
-        const columnNames = tableInfo.map(col => col.name);
+        const tableExists = tableInfo.length > 0;
+        let needsRecreation = false;
 
-        console.log('[DB] Istniejące kolumny:', columnNames.join(', '));
-
-        if (!columnNames.includes('packet_uuid')) {
-            db.exec('ALTER TABLE measurement_batches ADD COLUMN packet_uuid TEXT UNIQUE');
-            console.log('[DB] ✔ Kolumna "packet_uuid" została dodana.');
+        if (tableExists) {
+            const columnNames = tableInfo.map(col => col.name);
+            // Kluczowy warunek: jeśli brakuje packet_uuid, schemat jest niekompatybilny.
+            if (!columnNames.includes('packet_uuid')) {
+                needsRecreation = true;
+                console.warn('[DB] Wykryto stary, niekompatybilny schemat (brak kolumny "packet_uuid").');
+                console.warn('[DB] Zgodnie z decyzją, stara tabela i jej dane zostaną usunięte.');
+            }
         }
 
-        // Zmiana nazwy kolumny timestamp na packet_timestamp dla spójności
-        if (columnNames.includes('timestamp') && !columnNames.includes('packet_timestamp')) {
-            // better-sqlite3 nie wspiera RENAME COLUMN bezpośrednio w starszych wersjach SQLite.
-            // Zamiast tego, tworzymy nową tabelę i kopiujemy dane.
-            // UWAGA: To jest uproszczona migracja. W produkcji wymagałoby to blokady zapisu.
-            console.log('[DB] Wykryto starą kolumnę "timestamp". Rozpoczynam migrację do "packet_timestamp"...');
-            db.exec('ALTER TABLE measurement_batches RENAME TO measurement_batches_old');
+        // Jeśli tabela jest niekompatybilna, usuwamy ją.
+        if (needsRecreation) {
+            db.exec('DROP TABLE measurement_batches');
+            console.log('[DB] ✔ Stara tabela "measurement_batches" została usunięta.');
+        }
+
+        // Tworzymy tabelę, jeśli nie istniała lub została właśnie usunięta.
+        if (needsRecreation || !tableExists) {
+            console.log('[DB] Tworzenie tabeli "measurement_batches" z nowym, poprawnym schematem...');
             db.exec(`CREATE TABLE measurement_batches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 island_id TEXT NOT NULL,
@@ -89,49 +95,30 @@ const dbMigration = () => {
                 is_synced INTEGER DEFAULT 0,
                 sync_timestamp TEXT
             )`);
-            db.exec(`INSERT INTO measurement_batches (id, island_id, packet_timestamp, measurements_json, protocol, received_at, packet_uuid)
-                    SELECT id, island_id, timestamp, measurements_json, protocol, received_at, packet_uuid
-                    FROM measurement_batches_old`);
-            db.exec('DROP TABLE measurement_batches_old');
-            console.log('[DB] ✔ Pomyślnie zmigrowano "timestamp" do "packet_timestamp".');
-        } else if (!db.pragma('table_info(measurement_batches)').length) {
-            // Jeśli tabela nie istnieje (np. pierwsze uruchomienie), stwórz ją z nowym schematem
-            db.exec(`CREATE TABLE measurement_batches (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                island_id TEXT NOT NULL,
-                packet_timestamp INTEGER NOT NULL,
-                measurements_json TEXT NOT NULL,
-                protocol TEXT,
-                received_at INTEGER,
-                packet_uuid TEXT UNIQUE,
-                created_at TEXT,
-                is_synced INTEGER DEFAULT 0,
-                sync_timestamp TEXT
-            )`);
-            console.log('[DB] ✔ Tabela "measurement_batches" została utworzona z nowym schematem.');
+            console.log('[DB] ✔ Tabela "measurement_batches" została utworzona pomyślnie.');
+        } else {
+            // Jeśli tabela już istnieje i jest kompatybilna, możemy w przyszłości dodawać tu kolejne kolumny.
+            console.log('[DB] Tabela "measurement_batches" jest już w aktualnym schemacie.');
+             const finalColumns = db.pragma('table_info(measurement_batches)').map(c => c.name);
+                if (!finalColumns.includes('created_at')) {
+                    db.exec('ALTER TABLE measurement_batches ADD COLUMN created_at TEXT');
+                    console.log('[DB] ✔ Dodano brakującą kolumnę "created_at".');
+                }
+                if (!finalColumns.includes('is_synced')) {
+                    db.exec('ALTER TABLE measurement_batches ADD COLUMN is_synced INTEGER DEFAULT 0');
+                    console.log('[DB] ✔ Dodano brakującą kolumnę "is_synced".');
+                }
+                if (!finalColumns.includes('sync_timestamp')) {
+                    db.exec('ALTER TABLE measurement_batches ADD COLUMN sync_timestamp TEXT');
+                    console.log('[DB] ✔ Dodano brakującą kolumnę "sync_timestamp".');
+                }
         }
-
-        // Dodaj pozostałe kolumny, jeśli nie istnieją
-        const finalColumns = db.pragma('table_info(measurement_batches)').map(c => c.name);
-        if (!finalColumns.includes('created_at')) {
-            db.exec('ALTER TABLE measurement_batches ADD COLUMN created_at TEXT');
-            console.log('[DB] ✔ Kolumna "created_at" została dodana.');
-        }
-        if (!finalColumns.includes('is_synced')) {
-            db.exec('ALTER TABLE measurement_batches ADD COLUMN is_synced INTEGER DEFAULT 0');
-            console.log('[DB] ✔ Kolumna "is_synced" została dodana.');
-        }
-        if (!finalColumns.includes('sync_timestamp')) {
-            db.exec('ALTER TABLE measurement_batches ADD COLUMN sync_timestamp TEXT');
-            console.log('[DB] ✔ Kolumna "sync_timestamp" została dodana.');
-        }
-
+        
         console.log('[DB] Weryfikacja schematu zakończona pomyślnie.');
         console.log('[DB] Finalny schemat tabeli:', db.pragma('table_info(measurement_batches)'));
 
     } catch (error) {
         console.error('[DB] [BŁĄD KRYTYCZNY] Migracja bazy danych nie powiodła się:', error);
-        // Zatrzymujemy aplikację, jeśli migracja się nie powiedzie, aby uniknąć błędów
         process.exit(1);
     }
 };
