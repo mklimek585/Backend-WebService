@@ -64,6 +64,18 @@ db.exec(`CREATE TABLE IF NOT EXISTS measurement_batches (
     received_at INTEGER NOT NULL
 )`);
 
+// Prosta migracja: dodaj kolumnę packet_uuid, jeśli nie istnieje
+try {
+    const columns = db.pragma('table_info(measurement_batches)');
+    const hasUuidColumn = columns.some(col => col.name === 'packet_uuid');
+    if (!hasUuidColumn) {
+        db.exec('ALTER TABLE measurement_batches ADD COLUMN packet_uuid TEXT UNIQUE');
+        console.log('[DB] Kolumna packet_uuid została dodana do tabeli.');
+    }
+} catch (error) {
+    console.error('[DB] Błąd podczas migracji schematu:', error);
+}
+
 const LOCAL_DB_LIMIT = 1000;
 
 function insertBatch({island_id, timestamp, measurements, protocol}) {
@@ -203,6 +215,66 @@ app.get('/api/measurements/all', apiKeyAuth, (req, res) => {
 app.delete('/api/localdb', apiKeyAuth, (req, res) => {
     clearBatches();
     res.json({ status: 'cleared' });
+});
+
+// Nowy endpoint do masowego zapisu pomiarów
+app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
+    const packets = req.body;
+
+    if (!Array.isArray(packets)) {
+        return res.status(400).json({ error: 'Body should be an array of packets' });
+    }
+
+    const insertStmt = db.prepare(
+        'INSERT INTO measurement_batches (packet_uuid, island_id, timestamp, measurements_json, protocol, received_at) VALUES (?, ?, ?, ?, ?, ?)'
+    );
+
+    const insertTransaction = db.transaction((packetsToInsert) => {
+        let insertedCount = 0;
+        for (const packet of packetsToInsert) {
+            try {
+                // Pola z RPi: packet_uuid, island_id, packet_timestamp, measurements_json
+                insertStmt.run(
+                    packet.packet_uuid,
+                    packet.island_id,
+                    packet.packet_timestamp,
+                    packet.measurements_json,
+                    'HTTP_BULK', // Nowy, dedykowany protokół dla tego endpointu
+                    Date.now()
+                );
+                insertedCount++;
+            } catch (err) {
+                if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+                    // Ignorujemy błąd duplikatu - to oczekiwane zachowanie
+                    console.log(`[DB] Zignorowano zduplikowany pakiet: ${packet.packet_uuid}`);
+                } else {
+                    // Jeśli to inny błąd, przerywamy transakcję
+                    console.error('[DB] Błąd transakcji, wykonuję rollback:', err);
+                    throw err; 
+                }
+            }
+        }
+        return insertedCount;
+    });
+
+    try {
+        const insertedCount = insertTransaction(packets);
+        console.log(`[HTTP_BULK] Przetworzono ${packets.length} pakietów, zapisano ${insertedCount} nowych.`);
+        
+        if (insertedCount > 0) {
+            broadcastMeasurements();
+            autoClearIfLimit();
+        }
+
+        res.status(201).json({ 
+            message: 'Bulk data processed.',
+            received: packets.length,
+            inserted: insertedCount 
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to process bulk data due to a server error.' });
+    }
 });
 
 // Endpoint do debugowania - ładny widok całej bazy
