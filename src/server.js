@@ -56,34 +56,93 @@ console.log('Middleware configured');
 // Inicjalizacja bazy SQLite w katalogu projektu
 const db = new Database(path.join(__dirname, '../local_measurements.db'));
 
-// 3. Zweryfikuj Schemat Bazy Danych na Serwerze
-console.log('Aktualny schemat tabeli measurement_batches:', db.pragma('table_info(measurement_batches)'));
+// --- Ulepszona Migracja Bazy Danych ---
+const dbMigration = () => {
+    console.log('[DB] Rozpoczynam weryfikację i migrację schematu bazy danych...');
+    try {
+        const tableInfo = db.pragma('table_info(measurement_batches)');
+        const columnNames = tableInfo.map(col => col.name);
 
-db.exec(`CREATE TABLE IF NOT EXISTS measurement_batches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    island_id TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
-    measurements_json TEXT NOT NULL,
-    protocol TEXT NOT NULL,
-    received_at INTEGER NOT NULL
-)`);
+        console.log('[DB] Istniejące kolumny:', columnNames.join(', '));
 
-// Prosta migracja: dodaj kolumnę packet_uuid, jeśli nie istnieje
-try {
-    const columns = db.pragma('table_info(measurement_batches)');
-    const hasUuidColumn = columns.some(col => col.name === 'packet_uuid');
-    if (!hasUuidColumn) {
-        db.exec('ALTER TABLE measurement_batches ADD COLUMN packet_uuid TEXT UNIQUE');
-        console.log('[DB] Kolumna packet_uuid została dodana do tabeli.');
+        if (!columnNames.includes('packet_uuid')) {
+            db.exec('ALTER TABLE measurement_batches ADD COLUMN packet_uuid TEXT UNIQUE');
+            console.log('[DB] ✔ Kolumna "packet_uuid" została dodana.');
+        }
+
+        // Zmiana nazwy kolumny timestamp na packet_timestamp dla spójności
+        if (columnNames.includes('timestamp') && !columnNames.includes('packet_timestamp')) {
+            // better-sqlite3 nie wspiera RENAME COLUMN bezpośrednio w starszych wersjach SQLite.
+            // Zamiast tego, tworzymy nową tabelę i kopiujemy dane.
+            // UWAGA: To jest uproszczona migracja. W produkcji wymagałoby to blokady zapisu.
+            console.log('[DB] Wykryto starą kolumnę "timestamp". Rozpoczynam migrację do "packet_timestamp"...');
+            db.exec('ALTER TABLE measurement_batches RENAME TO measurement_batches_old');
+            db.exec(`CREATE TABLE measurement_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                island_id TEXT NOT NULL,
+                packet_timestamp INTEGER NOT NULL,
+                measurements_json TEXT NOT NULL,
+                protocol TEXT,
+                received_at INTEGER,
+                packet_uuid TEXT UNIQUE,
+                created_at TEXT,
+                is_synced INTEGER DEFAULT 0,
+                sync_timestamp TEXT
+            )`);
+            db.exec(`INSERT INTO measurement_batches (id, island_id, packet_timestamp, measurements_json, protocol, received_at, packet_uuid)
+                    SELECT id, island_id, timestamp, measurements_json, protocol, received_at, packet_uuid
+                    FROM measurement_batches_old`);
+            db.exec('DROP TABLE measurement_batches_old');
+            console.log('[DB] ✔ Pomyślnie zmigrowano "timestamp" do "packet_timestamp".');
+        } else if (!db.pragma('table_info(measurement_batches)').length) {
+            // Jeśli tabela nie istnieje (np. pierwsze uruchomienie), stwórz ją z nowym schematem
+            db.exec(`CREATE TABLE measurement_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                island_id TEXT NOT NULL,
+                packet_timestamp INTEGER NOT NULL,
+                measurements_json TEXT NOT NULL,
+                protocol TEXT,
+                received_at INTEGER,
+                packet_uuid TEXT UNIQUE,
+                created_at TEXT,
+                is_synced INTEGER DEFAULT 0,
+                sync_timestamp TEXT
+            )`);
+            console.log('[DB] ✔ Tabela "measurement_batches" została utworzona z nowym schematem.');
+        }
+
+        // Dodaj pozostałe kolumny, jeśli nie istnieją
+        const finalColumns = db.pragma('table_info(measurement_batches)').map(c => c.name);
+        if (!finalColumns.includes('created_at')) {
+            db.exec('ALTER TABLE measurement_batches ADD COLUMN created_at TEXT');
+            console.log('[DB] ✔ Kolumna "created_at" została dodana.');
+        }
+        if (!finalColumns.includes('is_synced')) {
+            db.exec('ALTER TABLE measurement_batches ADD COLUMN is_synced INTEGER DEFAULT 0');
+            console.log('[DB] ✔ Kolumna "is_synced" została dodana.');
+        }
+        if (!finalColumns.includes('sync_timestamp')) {
+            db.exec('ALTER TABLE measurement_batches ADD COLUMN sync_timestamp TEXT');
+            console.log('[DB] ✔ Kolumna "sync_timestamp" została dodana.');
+        }
+
+        console.log('[DB] Weryfikacja schematu zakończona pomyślnie.');
+        console.log('[DB] Finalny schemat tabeli:', db.pragma('table_info(measurement_batches)'));
+
+    } catch (error) {
+        console.error('[DB] [BŁĄD KRYTYCZNY] Migracja bazy danych nie powiodła się:', error);
+        // Zatrzymujemy aplikację, jeśli migracja się nie powiedzie, aby uniknąć błędów
+        process.exit(1);
     }
-} catch (error) {
-    console.error('[DB] Błąd podczas migracji schematu:', error);
-}
+};
+
+// Uruchom migrację przy starcie aplikacji
+dbMigration();
 
 const LOCAL_DB_LIMIT = 1000;
 
 function insertBatch({island_id, timestamp, measurements, protocol}) {
-    const stmt = db.prepare(`INSERT INTO measurement_batches (packet_uuid, island_id, timestamp, measurements_json, protocol, received_at)
+    const stmt = db.prepare(`INSERT INTO measurement_batches (packet_uuid, island_id, packet_timestamp, measurements_json, protocol, received_at)
         VALUES (?, ?, ?, ?, ?, ?)`);
     stmt.run(
         randomUUID(),
@@ -116,18 +175,18 @@ function getLatestMeasurements() {
     const latestBatches = db.prepare(`
         SELECT mb.* FROM measurement_batches mb
         INNER JOIN (
-            SELECT island_id, MAX(timestamp) as max_timestamp
+            SELECT island_id, MAX(packet_timestamp) as max_timestamp
             FROM measurement_batches
             GROUP BY island_id
-        ) latest ON mb.island_id = latest.island_id AND mb.timestamp = latest.max_timestamp
-        ORDER BY mb.timestamp DESC
+        ) latest ON mb.island_id = latest.island_id AND mb.packet_timestamp = latest.max_timestamp
+        ORDER BY mb.packet_timestamp DESC
     `).all();
     
     // Jeśli nie ma najnowszych paczek, weź po prostu ostatnie dostępne
     if (latestBatches.length === 0) {
         const fallbackBatches = db.prepare(`
             SELECT * FROM measurement_batches 
-            ORDER BY timestamp DESC 
+            ORDER BY packet_timestamp DESC 
             LIMIT 10
         `).all();
         
@@ -149,7 +208,7 @@ function getLatestMeasurements() {
                 island_id: batch.island_id,
                 sensor_id: m.sensor_id,
                 value: m.value,
-                timestamp: batch.timestamp,
+                timestamp: batch.packet_timestamp,
                 protocol: batch.protocol,
             });
         }
@@ -207,7 +266,7 @@ app.get('/api/measurements/all', apiKeyAuth, (req, res) => {
                 island_id: batch.island_id,
                 sensor_id: m.sensor_id,
                 value: m.value,
-                timestamp: batch.timestamp,
+                timestamp: batch.packet_timestamp,
                 protocol: batch.protocol,
             });
         }
@@ -224,67 +283,89 @@ app.delete('/api/localdb', apiKeyAuth, (req, res) => {
 
 // Nowy endpoint do masowego zapisu pomiarów
 app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
-    // KROK 1: Dodaj logowanie otrzymanych danych.
-    console.log("--- OTRZYMANO ŻĄDANIE /BULK ---");
-    console.log("CIAŁO ŻĄDANIA:", JSON.stringify(req.body, null, 2));
+    console.log("--- OTRZYMANO ŻĄDANIE /api/measurements/bulk ---");
+    console.log("CIAŁO ŻĄDANIA (pierwsze 2 pakiety):", JSON.stringify(req.body.slice(0, 2), null, 2));
 
     const packets = req.body;
 
-    if (!Array.isArray(packets)) {
-        return res.status(400).json({ error: 'Body should be an array of packets' });
+    if (!Array.isArray(packets) || packets.length === 0) {
+        return res.status(400).json({ message: 'Request body must be a non-empty array of measurement packets.' });
     }
 
     const insertStmt = db.prepare(
-        'INSERT INTO measurement_batches (packet_uuid, island_id, timestamp, measurements_json, protocol, received_at) VALUES (?, ?, ?, ?, ?, ?)'
+        `INSERT INTO measurement_batches (
+            packet_uuid, 
+            island_id, 
+            packet_timestamp, 
+            measurements_json, 
+            created_at,
+            is_synced,
+            protocol, 
+            received_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     );
 
     const insertTransaction = db.transaction((packetsToInsert) => {
         let insertedCount = 0;
+        let ignoredCount = 0;
+
         for (const packet of packetsToInsert) {
+             // Walidacja podstawowych pól
+            if (!packet.packet_uuid || !packet.island_id || !packet.packet_timestamp || !packet.measurements_json || !packet.created_at) {
+                console.warn('[DB] Pominięto pakiet z powodu brakujących pól:', packet.packet_uuid);
+                continue; // Pomiń ten pakiet i przejdź do następnego
+            }
+
             try {
-                // Pola z RPi: packet_uuid, island_id, packet_timestamp, measurements_json
-                insertStmt.run(
+                const result = insertStmt.run(
                     packet.packet_uuid,
                     packet.island_id,
-                    packet.packet_timestamp,
+                    packet.packet_timestamp, // Zgodnie ze specyfikacją z RPi
                     packet.measurements_json,
-                    'HTTP_BULK', // Nowy, dedykowany protokół dla tego endpointu
+                    packet.created_at, // Nowe pole
+                    packet.is_synced !== undefined ? packet.is_synced : 0, // Nowe pole
+                    'HTTP_BULK',
                     Date.now()
                 );
-                insertedCount++;
+                if (result.changes > 0) {
+                    insertedCount++;
+                }
             } catch (err) {
                 if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
                     // Ignorujemy błąd duplikatu - to oczekiwane zachowanie
+                    ignoredCount++;
                     console.log(`[DB] Zignorowano zduplikowany pakiet: ${packet.packet_uuid}`);
                 } else {
-                    // KROK 2: Dodaj szczegółowe logowanie błędu.
                     console.error("--- KRYTYCZNY BŁĄD TRANSAKCJI ---");
                     console.error("PAKIET POWODUJĄCY BŁĄD:", JSON.stringify(packet, null, 2));
                     console.error("OBIEKT BŁĘDU:", err);
-                    throw err; 
+                    throw err; // Przerwij transakcję
                 }
             }
         }
-        return insertedCount;
+        return { inserted: insertedCount, ignored: ignoredCount };
     });
 
     try {
-        const insertedCount = insertTransaction(packets);
-        console.log(`[HTTP_BULK] Przetworzono ${packets.length} pakietów, zapisano ${insertedCount} nowych.`);
+        const { inserted, ignored } = insertTransaction(packets);
+        const received = packets.length;
         
-        if (insertedCount > 0) {
-            broadcastMeasurements();
+        console.log(`[HTTP_BULK] Przetworzono ${received} pakietów. Zapisano: ${inserted}, Zignorowano (duplikaty): ${ignored}.`);
+        
+        if (inserted > 0) {
+            broadcastMeasurements(); // Powiadom podłączonych klientów o nowych danych
             autoClearIfLimit();
         }
 
         res.status(201).json({ 
-            message: 'Bulk data processed.',
-            received: packets.length,
-            inserted: insertedCount 
+            message: 'Bulk data processed successfully.',
+            received: received,
+            inserted: inserted,
+            duplicates_ignored: ignored
         });
 
     } catch (error) {
-        res.status(500).json({ error: 'Failed to process bulk data due to a server error.' });
+        res.status(500).json({ message: 'Failed to process bulk data due to a server error.', error: error.message });
     }
 });
 
@@ -294,8 +375,8 @@ app.get('/api/debug', apiKeyAuth, (req, res) => {
     const stats = {
         total_batches: batches.length,
         database_size_kb: Math.round(batches.length * 0.5), // szacunkowy rozmiar
-        oldest_timestamp: batches.length > 0 ? Math.min(...batches.map(b => b.timestamp)) : null,
-        newest_timestamp: batches.length > 0 ? Math.max(...batches.map(b => b.timestamp)) : null,
+        oldest_timestamp: batches.length > 0 ? Math.min(...batches.map(b => b.packet_timestamp)) : null,
+        newest_timestamp: batches.length > 0 ? Math.max(...batches.map(b => b.packet_timestamp)) : null,
         protocols: {}
     };
     
@@ -321,8 +402,8 @@ app.get('/api/debug', apiKeyAuth, (req, res) => {
     const recentBatches = batches.slice(-5).map(batch => ({
         id: batch.id,
         island_id: batch.island_id,
-        timestamp: batch.timestamp,
-        date: formatTimestamp(batch.timestamp),
+        timestamp: batch.packet_timestamp,
+        date: formatTimestamp(batch.packet_timestamp),
         protocol: batch.protocol,
         measurements_count: JSON.parse(batch.measurements_json).length,
         measurements: JSON.parse(batch.measurements_json)
