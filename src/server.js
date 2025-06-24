@@ -224,8 +224,9 @@ app.delete('/api/localdb', apiKeyAuth, (req, res) => {
 
 // Nowy endpoint do masowego zapisu pomiarów
 app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
-    // 1. Wyświetl Dokładną Treść Otrzymywanych Danych
-    console.log("Otrzymano żądanie /bulk:", JSON.stringify(req.body, null, 2));
+    // KROK 1: Dodaj logowanie otrzymanych danych.
+    console.log("--- OTRZYMANO ŻĄDANIE /BULK ---");
+    console.log("CIAŁO ŻĄDANIA:", JSON.stringify(req.body, null, 2));
 
     const packets = req.body;
 
@@ -256,8 +257,10 @@ app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
                     // Ignorujemy błąd duplikatu - to oczekiwane zachowanie
                     console.log(`[DB] Zignorowano zduplikowany pakiet: ${packet.packet_uuid}`);
                 } else {
-                    // 2. Wyświetl Dokładny Błąd z Bazy Danych
-                    console.error('[DB] KRYTYCZNY BŁĄD TRANSAKCJI, wykonuję rollback:', err);
+                    // KROK 2: Dodaj szczegółowe logowanie błędu.
+                    console.error("--- KRYTYCZNY BŁĄD TRANSAKCJI ---");
+                    console.error("PAKIET POWODUJĄCY BŁĄD:", JSON.stringify(packet, null, 2));
+                    console.error("OBIEKT BŁĘDU:", err);
                     throw err; 
                 }
             }
