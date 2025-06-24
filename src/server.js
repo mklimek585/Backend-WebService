@@ -126,24 +126,51 @@ const dbMigration = () => {
 // Uruchom migrację przy starcie aplikacji
 dbMigration();
 
-const LOCAL_DB_LIMIT = 1000;
+// === GŁÓWNA LOGIKA ZAPISU ===
 
-function insertBatch({island_id, timestamp, measurements, protocol}) {
-    const stmt = db.prepare(`INSERT INTO measurement_batches (packet_uuid, island_id, packet_timestamp, measurements_json, protocol, received_at)
-        VALUES (?, ?, ?, ?, ?, ?)`);
-    stmt.run(
-        randomUUID(),
-        island_id,
-        timestamp,
-        JSON.stringify(measurements),
-        protocol,
-        Date.now()
+function insertSinglePacket(packet, protocol) {
+    console.log(`[DB] Próba zapisu pakietu ${packet.packet_uuid} przez ${protocol}`);
+    
+    // Walidacja podstawowych pól pakietu
+    if (!packet.packet_uuid || !packet.island_id || !packet.timestamp || !packet.measurements) {
+        console.error(`[DB] Błąd walidacji: Pakiet z ${protocol} nie ma wszystkich wymaganych pól.`, packet);
+        throw new Error('Invalid packet structure');
+    }
+
+    const insertStmt = db.prepare(
+        `INSERT INTO measurement_batches (
+            packet_uuid, island_id, packet_timestamp, measurements_json, 
+            created_at, is_synced, protocol, received_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    // Logujemy po każdym zapisie
-    console.log(`[DB] Zapisano paczkę: {island_id: ${island_id}, timestamp: ${timestamp}, protocol: ${protocol}, measurements: ${measurements.length}}`);
-    const count = getBatchCount();
-    console.log(`[DB] Liczba paczek w bazie po zapisie: ${count}`);
+
+    try {
+        const result = insertStmt.run(
+            packet.packet_uuid,
+            packet.island_id,
+            packet.timestamp, // Pole 'timestamp' z pakietu
+            JSON.stringify(packet.measurements), // Pole 'measurements' jest parsowane na JSON
+            new Date().toISOString(), // Używamy aktualnej daty jako 'created_at'
+            0,
+            protocol,
+            Date.now()
+        );
+        if (result.changes > 0) {
+            console.log(`[DB] ✔ Pakiet ${packet.packet_uuid} pomyślnie zapisany.`);
+            return { inserted: true, ignored: false };
+        }
+    } catch (err) {
+        if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+            console.log(`[DB] Duplikat pakietu ${packet.packet_uuid} zignorowany.`);
+            return { inserted: false, ignored: true };
+        }
+        // Dla innych błędów, rzucamy dalej, aby można je było obsłużyć na poziomie endpointu
+        console.error(`[DB] Krytyczny błąd zapisu dla pakietu ${packet.packet_uuid}:`, err);
+        throw err;
+    }
 }
+
+const LOCAL_DB_LIMIT = 1000;
 
 function getBatchCount() {
     return db.prepare('SELECT COUNT(*) as count FROM measurement_batches').get().count;
@@ -268,7 +295,7 @@ app.delete('/api/localdb', apiKeyAuth, (req, res) => {
     res.json({ status: 'cleared' });
 });
 
-// Nowy endpoint do masowego zapisu pomiarów
+// Nowy endpoint do masowego zapisu pomiarów (ścieżka niezawodna)
 app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
     console.log("--- OTRZYMANO ŻĄDANIE /api/measurements/bulk ---");
     console.log("CIAŁO ŻĄDANIA (pierwsze 2 pakiety):", JSON.stringify(req.body.slice(0, 2), null, 2));
@@ -319,7 +346,6 @@ app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
                 }
             } catch (err) {
                 if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-                    // Ignorujemy błąd duplikatu - to oczekiwane zachowanie
                     ignoredCount++;
                     console.log(`[DB] Zignorowano zduplikowany pakiet: ${packet.packet_uuid}`);
                 } else {
@@ -340,7 +366,7 @@ app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
         console.log(`[HTTP_BULK] Przetworzono ${received} pakietów. Zapisano: ${inserted}, Zignorowano (duplikaty): ${ignored}.`);
         
         if (inserted > 0) {
-            broadcastMeasurements(); // Powiadom podłączonych klientów o nowych danych
+            broadcastMeasurements();
             autoClearIfLimit();
         }
 
@@ -353,6 +379,32 @@ app.post('/api/measurements/bulk', apiKeyAuth, (req, res) => {
 
     } catch (error) {
         res.status(500).json({ message: 'Failed to process bulk data due to a server error.', error: error.message });
+    }
+});
+
+// Endpoint do dodawania nowych pomiarów (szybka ścieżka HTTP)
+app.post('/api/measurements', apiKeyAuth, (req, res) => {
+    const packet = req.body;
+    console.log(`--- OTRZYMANO ŻĄDANIE /api/measurements (szybka ścieżka) dla pakietu ${packet.packet_uuid} ---`);
+
+    // Walidacja podstawowych pól pakietu
+    if (!packet || !packet.packet_uuid || !packet.island_id || !packet.timestamp || !packet.measurements) {
+        return res.status(400).json({ message: 'Invalid or incomplete packet structure.' });
+    }
+
+    try {
+        const result = insertSinglePacket(packet, 'HTTP_FAST');
+        
+        if (result.inserted) {
+            broadcastMeasurements();
+            autoClearIfLimit();
+            return res.status(201).json({ message: 'Packet created successfully.' });
+        } else if (result.ignored) {
+            return res.status(200).json({ message: 'Packet already exists, ignored.' });
+        }
+    } catch (error) {
+        // Obsługa błędów z insertSinglePacket (np. krytycznych błędów bazy)
+        return res.status(500).json({ message: 'Failed to process packet due to a server error.', error: error.message });
     }
 });
 
@@ -410,76 +462,30 @@ app.get('/api/debug', apiKeyAuth, (req, res) => {
     });
 });
 
-// Endpoint do dodawania nowych pomiarów - chroniony API key
-app.post('/api/measurements', apiKeyAuth, (req, res) => {
-    const data = Array.isArray(req.body) ? req.body : [req.body];
-    let allNewMeasurements = [];
-    for (const entry of data) {
-        const { island_id, measurements } = entry;
-        
-        let timestamp = entry.timestamp;
-        if (timestamp) {
-            // Jeśli timestamp jest w sekundach (liczba mniejsza niż 10^12), konwertuj na milisekundy
-            if (timestamp < 1000000000000) {
-                timestamp *= 1000;
-            }
-        } else {
-            timestamp = Date.now();
-        }
-
-        if (!island_id || !timestamp || !measurements) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
-
-        insertBatch({ island_id, timestamp, measurements, protocol: 'HTTP' });
-
-        console.log(`[HTTP] Odebrano paczkę z ${island_id}`);
-        broadcastMeasurements();
-        autoClearIfLimit();
-    }
-    res.status(201).json(allNewMeasurements);
-});
-
-// Endpoint do sprawdzenia statusu serwera - bez API key
-app.get('/health', (req, res) => {
-    console.log('Health check requested');
-    res.json({ status: 'ok' });
-});
-
 // Konfiguracja MQTT
 const MQTT_PORT = process.env.MQTT_PORT || 1883;
 
-// Obsługa wiadomości MQTT
-aedes.on('publish', (packet, client) => {
+// Obsługa wiadomości MQTT (szybka ścieżka MQTT)
+aedes.on('publish', async (packet, client) => {
     if (client) {
         try {
             const payload = JSON.parse(packet.payload.toString());
-            const data = Array.isArray(payload) ? payload : [payload];
-            for (const entry of data) {
-                const { island_id, measurements } = entry;
+            // Walidacja pakietu z MQTT
+             if (!payload || !payload.packet_uuid || !payload.island_id || !payload.timestamp || !payload.measurements) {
+                console.error('[MQTT] Odrzucono niekompletny pakiet:', payload);
+                return;
+            }
 
-                let timestamp = entry.timestamp;
-                if (timestamp) {
-                    // Jeśli timestamp jest w sekundach (liczba mniejsza niż 10^12), konwertuj na milisekundy
-                    if (timestamp < 1000000000000) {
-                        timestamp *= 1000;
-                    }
-                } else {
-                    timestamp = Date.now();
-                }
-                
-                if (!island_id || !timestamp || !measurements) {
-                    return res.status(400).json({ error: 'Missing required fields' });
-                }
+            console.log(`--- OTRZYMANO WIADOMOŚĆ MQTT (szybka ścieżka) dla pakietu ${payload.packet_uuid} ---`);
+            
+            const result = insertSinglePacket(payload, 'MQTT');
 
-                insertBatch({ island_id, timestamp, measurements, protocol: 'MQTT' });
-
-                console.log(`[MQTT] Odebrano paczkę z ${client.id} (${island_id})`);
+            if (result.inserted) {
                 broadcastMeasurements();
                 autoClearIfLimit();
             }
         } catch (e) {
-            console.error('Error processing MQTT message:', e);
+            console.error('[MQTT] Błąd podczas przetwarzania wiadomości MQTT:', e.message);
         }
     }
 });
@@ -493,29 +499,80 @@ aedes.on('clientDisconnect', (client) => {
     console.log('MQTT client disconnected:', client.id);
 });
 
-// Utworzenie serwerów HTTP i MQTT WebSocket
+// === OSTATECZNA, POPRAWNA KONFIGURACJA SERWERÓW ===
+
 const httpServer = createServer(app);
 
-// Konfiguracja WebSocket dla MQTT na ścieżce /mqtt
-const wsServer = new WebSocket.Server({ 
-    server: httpServer,
-    path: '/mqtt'
+// --- Serwer WebSocket dla powiadomień do frontendu ---
+const wss = new WebSocket.Server({ noServer: true });
+
+wss.on('connection', ws => {
+    console.log('[WSS] Klient frontendu połączony.');
+    
+    // Po podłączeniu, wyślij natychmiast aktualny stan danych
+    try {
+        const initialData = getLatestMeasurements();
+        ws.send(JSON.stringify({ type: 'initial_state', payload: initialData }));
+    } catch (error) {
+        console.error('[WSS] Nie udało się wysłać stanu początkowego:', error);
+    }
+
+    ws.on('close', () => {
+        console.log('[WSS] Klient frontendu rozłączony.');
+    });
 });
 
-wsServer.on('connection', (ws, req) => {
-    console.log('MQTT WebSocket connection established from:', req.connection.remoteAddress);
-    const stream = WebSocket.createWebSocketStream(ws);
+// Globalna funkcja do rozgłaszania aktualizacji do frontendu
+function broadcastMeasurements() {
+    console.log('[WSS] Rozpoczynam transmisję aktualizacji do klientów frontendu...');
+    try {
+        const latestMeasurements = getLatestMeasurements();
+        const dataToBroadcast = JSON.stringify({
+            type: 'measurements_update',
+            payload: latestMeasurements
+        });
+
+        wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(dataToBroadcast);
+            }
+        });
+        console.log(`[WSS] Transmisja zakończona pomyślnie do ${wss.clients.size} klientów.`);
+    } catch (error) {
+        console.error('[WSS] Błąd podczas transmisji WebSocket:', error);
+    }
+}
+
+// --- Serwer WebSocket dla MQTT ---
+const mqttWss = new WebSocket.Server({ noServer: true });
+
+mqttWss.on('connection', (ws, req) => {
+    console.log('[MQTT-WS] Klient MQTT połączony przez WebSocket.');
+    const stream = WebSocket.createWebSocketStream(ws, { decodeStrings: false });
     aedes.handle(stream);
 });
 
-wsServer.on('error', (error) => {
-    console.error('WebSocket server error:', error);
+// --- Główny router połączeń WebSocket ---
+httpServer.on('upgrade', (request, socket, head) => {
+    const pathname = request.url;
+
+    if (pathname === '/mqtt') {
+        // Jeśli ścieżka to /mqtt, przekaż do serwera MQTT
+        mqttWss.handleUpgrade(request, socket, head, (ws) => {
+            mqttWss.emit('connection', ws, request);
+        });
+    } else {
+        // W przeciwnym razie, przekaż do serwera dla frontendu
+        wss.handleUpgrade(request, socket, head, (ws) => {
+            wss.emit('connection', ws, request);
+        });
+    }
 });
 
-// Start serwera
+// --- Start serwera ---
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
-    console.log(`HTTP server running on port ${PORT}`);
-    console.log(`MQTT WebSocket server running on port ${PORT} at path /mqtt`);
-    console.log('Server initialization complete');
+    console.log(`Serwer HTTP i WebSocket działa na porcie ${PORT}`);
+    console.log('Gotowy na połączenia z frontendu (/) i urządzeń MQTT (/mqtt).');
+    console.log('Inicjalizacja serwera zakończona.');
 }); 
